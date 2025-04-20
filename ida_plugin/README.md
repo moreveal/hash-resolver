@@ -21,7 +21,15 @@ mklink /D "IDA\plugins\hashres" "script\path\ida_plugin"
 You can also just copy the folder manually if symlinks don't work.
 >
 
-3. **Restart IDA.** The plugin should load automatically.
+3. Manually create `hashres_plugin.py` (the stub) in the same `plugins/` folder:
+```python
+from hashres.plugin import PLUGIN_ENTRY as real_entry
+
+def PLUGIN_ENTRY():
+    return real_entry()
+```
+
+4. **Restart IDA.** The plugin should load automatically.
 
 ---
 
