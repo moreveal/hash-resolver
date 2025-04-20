@@ -60,6 +60,7 @@ Then open a binary in IDA → right click a hash function → **Resolve hash for
 python -m pytest
 ```
 CLI tests run in subprocesses to validate emulation
+
 ---
 
 ## 📎 License
