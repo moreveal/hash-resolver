@@ -1,0 +1,30 @@
+[project]
+name = "hash-resolver"
+version = "0.1.0"
+description = "Emulated API hash resolver with architecture-aware call signatures"
+authors = [{name = "moreveal", email = "morrisreveal@gmail.com"}]
+requires-python = ">=3.10"
+readme = "README.md"
+license = "MIT"
+
+dependencies = [
+    "unicorn>=2.0",
+    "loguru>=0.6",
+    "pefile>=2023.2",
+    "pyqt5",
+    "pyyaml",
+    "rich",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "mypy"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+hashres = "cli.main:main"
+
+[tool.setuptools]
+packages = ["hash_resolver"]

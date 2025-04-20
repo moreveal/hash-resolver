@@ -1,0 +1,11 @@
+__pycache__/
+.venv/
+.pytest_cache/
+.vscode/
+*egg-info/
+*.idb
+*.i64
+*.map
+*.bak
+*.pyd
+*.env

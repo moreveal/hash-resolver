@@ -1,0 +1,23 @@
+{
+    "name": "template",
+    "arch": "x86",
+    "calling_convention": "cdecl",
+    "args": [
+      {
+        "name": "arg0",
+        "type": "char*",
+        "resolve_input": true
+      }
+    ],
+    "return": {
+      "type": "uint32",
+      "from": "reg:eax"
+    },
+    "emu": {
+      "stack_base": "0x00FF0000",
+      "stack_size": "0x10000",
+      "mem_base": "0x00400000",
+      "esp_offset": "0x8000"
+    }
+  }
+  
