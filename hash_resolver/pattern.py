@@ -3,7 +3,7 @@ from loguru import logger
 from unicorn import *
 from unicorn.x86_const import *
 
-DEBUG_MODE = True
+DEBUG_MODE = False
 
 class Pattern:
     def __init__(self, pattern: dict):
