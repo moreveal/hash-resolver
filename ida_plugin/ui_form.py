@@ -1,264 +1,337 @@
+import idaapi
 import ida_kernwin
 import ida_funcs
 import ida_bytes
 
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QLineEdit,
-    QPushButton, QFileDialog, QMessageBox,
-    QFormLayout
+	QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
+	QPushButton, QFileDialog, QMessageBox, QFormLayout, QTabWidget, QProgressBar,
 )
+from PyQt5.QtCore import QSettings, QThread, pyqtSignal
+from pathlib import Path
+import json
 
-from PyQt5.QtCore import QSettings
+from hash_resolver.core import bulk_generate_hashes
+from hash_resolver.execution.emulated import EmulatedContext
+from hash_resolver.execution.runtime import RuntimeContext
+from hash_resolver.execution.runtime_launcher import launch_runtime_process, kill_runtime_process
+from hash_resolver.emulator import Emulator
+
+from hash_resolver.loader import load_pattern
+
 SETTINGS_ORG = "hashres"
 SETTINGS_APP = "HashResolver"
 SETTINGS_PATH_KEY = "symbols_path"
 SETTINGS_PATTERN_KEY = "last_pattern"
 
-import json
-from pathlib import Path
-
-this_dir = Path(__file__).parent
-signatures_dir = this_dir / "signatures"
-
-from hash_resolver.pattern import Pattern
-from hash_resolver.core import resolve_hash
-from hash_resolver.utils import parse_hex_fields
+signatures_dir = Path(__file__).parent / "signatures"
 
 class ResolverActionHandler(ida_kernwin.action_handler_t):
-    def activate(self, ctx):
-        ea = ctx.cur_ea
-        func = ida_funcs.get_func(ea)
-        if not func:
-            ida_kernwin.msg("No function at EA\n")
-            return 0
+	def activate(self, ctx):
+		ea = ctx.cur_ea
+		func = ida_funcs.get_func(ea)
+		if not func:
+			ida_kernwin.msg("No function at EA\n")
+			return 0
 
-        start = func.start_ea
-        end = func.end_ea
-        size = end - start
-        code = ida_bytes.get_bytes(start, size)
+		start = func.start_ea
+		end = func.end_ea
+		size = end - start
+		code = ida_bytes.get_bytes(start, size)
 
-        from .ui_form import show_resolver_dialog
-        show_resolver_dialog(func_name=ida_funcs.get_func_name(ea), func_bytes=code)
+		from .ui_form import show_resolver_dialog
+		show_resolver_dialog(func_name=ida_funcs.get_func_name(ea), func_bytes=code, func_address=start)
 
-        return 1
+		return 1
 
-    def update(self, ctx):
-        return ida_kernwin.AST_ENABLE_FOR_IDB
-
+	def update(self, ctx):
+		return ida_kernwin.AST_ENABLE_FOR_IDB
 
 ACTION_NAME = "hashres:resolve_context"
-ACTION_LABEL = "Resolve hash for this function"
+ACTION_LABEL = "Hash Resolver: Generate hashmap"
 
 class ContextMenuHook(ida_kernwin.UI_Hooks):
-    def finish_populating_widget_popup(self, widget, popup_handle):
-        if ida_kernwin.get_widget_type(widget) in [
-            ida_kernwin.BWN_DISASM,
-            ida_kernwin.BWN_PSEUDOCODE,
-        ]:
-            ida_kernwin.attach_action_to_popup(
-                widget,
-                popup_handle,
-                ACTION_NAME,
-                None,
-            )
+	def finish_populating_widget_popup(self, widget, popup_handle):
+		if ida_kernwin.get_widget_type(widget) in [
+			ida_kernwin.BWN_DISASM,
+			ida_kernwin.BWN_PSEUDOCODE,
+		]:
+			ida_kernwin.attach_action_to_popup(
+				widget,
+				popup_handle,
+				ACTION_NAME,
+				None,
+			)
 
+class HashWorker(QThread):
+	progress = pyqtSignal(int)      # Signal: how many steps to advance
+	done = pyqtSignal(dict)         # Signal: completed with result
 
+	def __init__(self, ctx, pattern, func, symbols, args):
+		super().__init__()
+		self.ctx = ctx
+		self.pattern = pattern
+		self.func = func
+		self.symbols = symbols
+		self.args = args
+
+	def run(self):
+		def callback(_, __):
+			self.progress.emit(1)
+
+		try:
+			result = bulk_generate_hashes(
+				self.ctx,
+				self.pattern,
+				self.func,
+				self.symbols,
+				self.args,
+				callback=callback
+			)
+		except Exception:
+			result = {}
+		finally:
+			if hasattr(self.ctx, 'cleanup'):
+				self.ctx.cleanup()
+
+		self.done.emit(result)
+  
 def register_context_action():
-    desc = ida_kernwin.action_desc_t(
-        ACTION_NAME,
-        ACTION_LABEL,
-        ResolverActionHandler(),
-        None,
-        "Resolve hash using this function",
-    )
-    ida_kernwin.register_action(desc)
+	desc = ida_kernwin.action_desc_t(
+		ACTION_NAME,
+		ACTION_LABEL,
+		ResolverActionHandler(),
+		None,
+		"Generate hashmap",
+	)
+	ida_kernwin.register_action(desc)
 
-    # hook UI
-    global _ctx_hook
-    _ctx_hook = ContextMenuHook()
-    _ctx_hook.hook()
+	# hook UI
+	global _ctx_hook
+	_ctx_hook = ContextMenuHook()
+	_ctx_hook.hook()
+ 
+def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
+	class ResolverDialog(QDialog):
+		def __init__(self):
+			super().__init__()
+			self.setWindowTitle("Hash Resolver")
+			self.setMinimumWidth(600)
 
+			self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+			layout = QVBoxLayout()
 
-def show_resolver_dialog(func_name=None, func_bytes=None):
-    class ResolverDialog(QDialog):
-        def __init__(self):
-            super().__init__()
-            self.setWindowTitle("Hash Resolver")
-            self.setMinimumWidth(600)
+			self.tabs = QTabWidget()
+			self.tabs.addTab(self.build_emu_tab(func_bytes), "Emulated")
+			self.tabs.addTab(self.build_runtime_tab(func_address), "Runtime")
 
-            layout = QVBoxLayout()
-            
-            self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+			layout.addWidget(self.tabs)
+			self.setLayout(layout)
 
-            # --- Pattern dropdown ---
-            self.pattern_combo = QComboBox()
-            self.pattern_paths = []
-            for f in signatures_dir.glob("*.json"):
-                self.pattern_combo.addItem(f.name)
-                self.pattern_paths.append(f)
-                
-            last_pattern = self.settings.value(SETTINGS_PATTERN_KEY, "")
-            if last_pattern:
-                index = self.pattern_combo.findText(last_pattern)
-                if index != -1:
-                    self.pattern_combo.setCurrentIndex(index)
+		def build_emu_tab(self, func_bytes):
+			tab = QVBoxLayout()
 
+			self.pattern_combo = QComboBox()
+			self.pattern_paths = []
+			for f in signatures_dir.glob("*.json"):
+				self.pattern_combo.addItem(f.name)
+				self.pattern_paths.append(f)
+			tab.addWidget(QLabel("Signature:"))
+			tab.addWidget(self.pattern_combo)
 
-            layout.addWidget(QLabel("Pattern:"))
-            layout.addWidget(self.pattern_combo)
+			# symbols
+			self.symbols_input_emu = QLineEdit()
+			self.symbols_input_emu.setPlaceholderText("Path to symbols.txt")
+			btn_sym = QPushButton("...")
+			btn_sym.clicked.connect(lambda: self.browse_file(self.symbols_input_emu))
+			row = QHBoxLayout()
+			row.addWidget(self.symbols_input_emu)
+			row.addWidget(btn_sym)
+			tab.addWidget(QLabel("Symbols list:"))
+			tab.addLayout(row)
 
-            # --- Hash field ---
-            self.hash_input = QLineEdit()
-            self.hash_input.setPlaceholderText("e.g. 0x53B2070F")
-            self.hash_input.textChanged.connect(self.on_hash_changed)
-            layout.addWidget(QLabel("Hash:"))
-            layout.addWidget(self.hash_input)
+			# args
+			self.arg_inputs_emu = {}
+			self.arg_layout_emu = QFormLayout()
+			tab.addLayout(self.arg_layout_emu)
+			self.pattern_combo.currentIndexChanged.connect(self.update_args_emu)
+			self.update_args_emu()
 
-            # --- Symbols path ---
-            symbols_layout = QHBoxLayout()
+			# output
+			self.output_emu = QLineEdit()
+			self.output_emu.setPlaceholderText("output.json")
+			btn_out = QPushButton("...")
+			btn_out.clicked.connect(lambda: self.browse_file(self.output_emu, save=True))
+			row_out = QHBoxLayout()
+			row_out.addWidget(self.output_emu)
+			row_out.addWidget(btn_out)
+			tab.addWidget(QLabel("Output path:"))
+			tab.addLayout(row_out)
 
-            self.symbols_input = QLineEdit()
-            self.symbols_input.setPlaceholderText("e.g. C:/symbols/kernel32.txt")
-            last_path = self.settings.value(SETTINGS_PATH_KEY, "")
-            if last_path:
-                self.symbols_input.setText(last_path)
+			# progress + buttons
+			self.progress_emu = QProgressBar()
+			self.progress_emu.setVisible(False)
+			tab.addWidget(self.progress_emu)
 
-            browse_btn = QPushButton("...")
-            browse_btn.clicked.connect(self.browse_symbols)
+			btn = QPushButton("Run")
+			btn.clicked.connect(lambda: self.run_bulk("emu", func_bytes))
+	
+			tab.addWidget(btn)
 
-            symbols_layout.addWidget(self.symbols_input)
-            symbols_layout.addWidget(browse_btn)
+			widget = QDialog()
+			widget.setLayout(tab)
+			return widget
 
-            def browse_symbols():
-                path, _ = QFileDialog.getOpenFileName(self, "Select symbols file", ".", "Text files (*.txt)")
-                if path:
-                    self.symbols_input.setText(path)
+		def build_runtime_tab(self, func_address):
+			tab = QVBoxLayout()
 
-            browse_btn.clicked.connect(browse_symbols)
+			self.pattern_combo_rt = QComboBox()
+			self.pattern_paths_rt = []
+			for f in signatures_dir.glob("*.json"):
+				self.pattern_combo_rt.addItem(f.name)
+				self.pattern_paths_rt.append(f)
+			tab.addWidget(QLabel("Signature:"))
+			tab.addWidget(self.pattern_combo_rt)
 
-            sym_row = QHBoxLayout()
-            sym_row.addWidget(self.symbols_input)
-            sym_row.addWidget(browse_btn)
+			self.exepath_input = QLineEdit()
+			self.exepath_input.setPlaceholderText("Path to EXE")
+			btn_exe = QPushButton("...")
+			btn_exe.clicked.connect(lambda: self.browse_file(self.exepath_input))
+			row_exe = QHBoxLayout()
+			row_exe.addWidget(self.exepath_input)
+			row_exe.addWidget(btn_exe)
+			tab.addWidget(QLabel("Target EXE:"))
+			tab.addLayout(row_exe)
 
-            layout.addWidget(QLabel("Symbols list:"))
-            layout.addLayout(sym_row)
-            
-            # --- Argument inputs ---
-            self.arg_inputs = {}
-            self.arg_layout = QFormLayout()
-            layout.addLayout(self.arg_layout)
-            # Connect pattern change
-            self.pattern_combo.currentIndexChanged.connect(self.update_arg_inputs)
-            self.update_arg_inputs() # trigger first load
+			self.symbols_input_rt = QLineEdit()
+			btn_sym = QPushButton("...")
+			btn_sym.clicked.connect(lambda: self.browse_file(self.symbols_input_rt))
+			row = QHBoxLayout()
+			row.addWidget(self.symbols_input_rt)
+			row.addWidget(btn_sym)
+			tab.addWidget(QLabel("Symbols list:"))
+			tab.addLayout(row)
 
-            # --- Buttons ---
-            btn_row = QHBoxLayout()
-            ok_btn = QPushButton("OK")
-            cancel_btn = QPushButton("Cancel")
+			# auto rva from current func
+			imagebase = idaapi.get_imagebase()
+			rva = func_address - imagebase if func_address else 0
+			self.rva_input = QLineEdit(str(hex(rva)))
+			tab.addWidget(QLabel("Hasher RVA:"))
+			tab.addWidget(self.rva_input)
 
-            ok_btn.clicked.connect(self.handle_ok)
-            cancel_btn.clicked.connect(self.reject)
+			self.arg_inputs_rt = {}
+			self.arg_layout_rt = QFormLayout()
+			tab.addLayout(self.arg_layout_rt)
+			self.pattern_combo_rt.currentIndexChanged.connect(self.update_args_rt)
+			self.update_args_rt()
 
-            btn_row.addWidget(ok_btn)
-            btn_row.addWidget(cancel_btn)
-            layout.addLayout(btn_row)
+			self.output_rt = QLineEdit()
+			btn_out = QPushButton("...")
+			btn_out.clicked.connect(lambda: self.browse_file(self.output_rt, save=True))
+			row_out = QHBoxLayout()
+			row_out.addWidget(self.output_rt)
+			row_out.addWidget(btn_out)
+			tab.addWidget(QLabel("Output path:"))
+			tab.addLayout(row_out)
 
-            self.setLayout(layout)
-            
-        def update_arg_inputs(self):
-            # Clear previous
-            for i in reversed(range(self.arg_layout.count())):
-                self.arg_layout.itemAt(i).widget().setParent(None)
-            self.arg_inputs.clear()
+			self.progress_rt = QProgressBar()
+			self.progress_rt.setVisible(False)
+			tab.addWidget(self.progress_rt)
 
-            # Load selected pattern
-            idx = self.pattern_combo.currentIndex()
-            try:
-                data = json.loads(self.pattern_paths[idx].read_text())
-                args = data.get("args", [])
-            except Exception as e:
-                QMessageBox.critical(self, "Pattern Load Failed", f"Failed to parse pattern: {e}")
-                return
+			btn = QPushButton("Run")
+			btn.clicked.connect(lambda: self.run_bulk("runtime"))
+			tab.addWidget(btn)
 
-            # Render fields
-            for arg in args:
-                if arg.get("resolve_input"):
-                    continue
+			widget = QDialog()
+			widget.setLayout(tab)
+			return widget
 
-                name = arg["name"]
-                typ = arg["type"]
-                le = QLineEdit()
-                if "default" in arg:
-                    le.setText(str(arg["default"]))
-                self.arg_inputs[name] = le
-                self.arg_layout.addRow(f"{name} ({typ})", le)
+		def update_args_emu(self):
+			self.update_args(self.pattern_paths, self.pattern_combo, self.arg_inputs_emu, self.arg_layout_emu)
 
-            
-        def browse_symbols(self):
-            path, _ = QFileDialog.getOpenFileName(
-                self,
-                "Select Symbols File",
-                "",
-                "Text Files (*.txt);;All Files (*)"
-            )
-            if path:
-                self.symbols_input.setText(path)
-                
-        def on_hash_changed(self, text):
-            if text and not text.startswith("0x") and all(c in "0123456789abcdefABCDEF" for c in text):
-                self.hash_input.setText("0x" + text)
+		def update_args_rt(self):
+			self.update_args(self.pattern_paths_rt, self.pattern_combo_rt, self.arg_inputs_rt, self.arg_layout_rt)
 
+		def update_args(self, pattern_paths, pattern_combo, inputs_dict, layout):
+			for i in reversed(range(layout.count())):
+				layout.itemAt(i).widget().setParent(None)
+			inputs_dict.clear()
+			idx = pattern_combo.currentIndex()
+			data = json.loads(pattern_paths[idx].read_text())
+			for arg in data.get("args", []):
+				if arg.get("resolve_input"):
+					continue
+				le = QLineEdit()
+				if "default" in arg:
+					le.setText(str(arg["default"]))
+				inputs_dict[arg["name"]] = le
+				layout.addRow(f"{arg['name']} ({arg['type']})", le)
 
-        def handle_ok(self):
-            # Load saved
-            symbols_path = self.symbols_input.text()
-            self.settings.setValue(SETTINGS_PATH_KEY, symbols_path)
+		def browse_file(self, lineedit, save=False):
+			if save:
+				path, _ = QFileDialog.getSaveFileName(self, "Select file", ".", "JSON (*.json)")
+			else:
+				path, _ = QFileDialog.getOpenFileName(self, "Select file", ".", "All Files (*)")
+			if path:
+				lineedit.setText(path)
 
-            current_pattern = self.pattern_combo.currentText()
-            self.settings.setValue(SETTINGS_PATTERN_KEY, current_pattern)
+		def run_bulk(self, mode, func_bytes=None):
+			try:
+				if mode == "emu":
+					syms_path = self.symbols_input_emu.text()
+					out = self.output_emu.text()
+					args = {k: v.text().strip() for k, v in self.arg_inputs_emu.items()}
+					pattern = load_pattern(self.pattern_paths[self.pattern_combo.currentIndex()])
+					print(pattern.emu)
+					ctx = EmulatedContext(Emulator(pattern.arch, pattern.emu))
+					symbols = Path(syms_path).read_text().splitlines()
+					bar = self.progress_emu
+					func = func_bytes
+					self._runtime_ctx = None
 
-            # ----------
+				elif mode == "runtime":
+					syms_path = self.symbols_input_rt.text()
+					out = self.output_rt.text()
+					args = {k: v.text().strip() for k, v in self.arg_inputs_rt.items()}
+					pattern = load_pattern(self.pattern_paths[self.pattern_combo_rt.currentIndex()])
+					exe = self.exepath_input.text()
+					rva = int(self.rva_input.text(), 0)
+					process, func = launch_runtime_process(exe, rva)
+					ctx = RuntimeContext(process, pattern.arch)
+					symbols = Path(syms_path).read_text().splitlines()
+					bar = self.progress_rt
+					self._runtime_ctx = ctx  # for cleanup later
+				else:
+					QMessageBox.warning(self, "Error", "Unknown mode")
+					return
+			except Exception as e:
+				QMessageBox.critical(self, "Error", f"Unknown exception: {e}")
+				return
 
-            # Parse hash
-            try:
-                raw = self.hash_input.text().strip()
-                h = int(raw, 16) if raw.startswith("0x") else int(raw)
-            except Exception:
-                QMessageBox.warning(self, "Invalid input", "Could not parse hash")
-                return
+			self.thread = HashWorker(ctx, pattern, func, symbols, args)
+			self.thread.progress.connect(lambda step: bar.setValue(bar.value() + step))
+			self.thread.done.connect(lambda result: self.on_bulk_done(result, out, mode))
+			bar.setRange(0, len(symbols))
+			bar.setValue(0)
+			bar.setVisible(True)
 
-            # Load pattern
-            idx = self.pattern_combo.currentIndex()
-            pattern_path = self.pattern_paths[idx]
-            try:
-                data = json.loads(pattern_path.read_text())
-                data["emu"] = parse_hex_fields(data["emu"])
-                pattern = Pattern(data)
-            except Exception as e:
-                QMessageBox.critical(self, "Pattern Error", f"Failed to load pattern: {e}")
-                return
+			self.thread.start()
+		
+		def on_bulk_done(self, results: dict, output_path: str, mode: str):
+			with open(output_path, "w", encoding="utf-8") as f:
+				json.dump(results, f, indent=2)
 
-            # Load symbols
-            try:
-                syms = Path(self.symbols_input.text()).read_text(encoding="utf-8").splitlines()
-            except Exception as e:
-                QMessageBox.critical(self, "Symbols Error", f"Failed to load symbols: {e}")
-                return
+			QMessageBox.information(self, "Done", f"Hash map saved to {output_path}")
 
-            # Resolve
-            try:
-                args = {
-                    name: field.text().strip()
-                    for name, field in self.arg_inputs.items()
-                }
-                                
-                result = resolve_hash(pattern, func_bytes, h, candidates=syms, arguments=args)
-                if result:
-                    QMessageBox.information(self, "Resolved", f"0x{h:08X} → {', '.join(result)}")
-                else:
-                    QMessageBox.information(self, "No Match", f"No symbol matched for 0x{h:08X}")
-            except Exception as e:
-                QMessageBox.critical(self, "Emulation Failed", f"{e}")
+			if mode == "runtime" and hasattr(self, "_runtime_ctx"):
+				self._runtime_ctx.cleanup()
+				kill_runtime_process(self._runtime_ctx.hProcess)
 
-    ResolverDialog().exec_()
+			self.progress_emu.setValue(0)
+			self.progress_emu.setVisible(False)
+
+			self.progress_rt.setValue(0)
+			self.progress_rt.setVisible(False)
+			
+
+	ResolverDialog().exec_()

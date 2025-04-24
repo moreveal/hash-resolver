@@ -13,7 +13,9 @@ dependencies = [
     "pefile>=2023.2",
     "pyqt5",
     "pyyaml",
+    "pywin32"
     "rich",
+    "tqdm"
 ]
 
 [project.optional-dependencies]
