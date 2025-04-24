@@ -1,6 +1,8 @@
 from unicorn import *
 from unicorn.x86_const import *
 
+from enum import Enum
+
 ARCH_MAP = {
     "x86": (UC_ARCH_X86, UC_MODE_32),
     "x64": (UC_ARCH_X86, UC_MODE_64),
@@ -18,15 +20,15 @@ class Emulator:
         self.stack_base = emu_config["stack_base"]
         self.stack_size = emu_config["stack_size"]
         self.mem_base = emu_config["mem_base"]
+        self.mem_size = 2 * 1024 * 1024
         self.esp_offset = emu_config["esp_offset"]
-        
         self.debug_mode = debug_mode
-
+        
         self._init_memory()
 
     def _init_memory(self):
         self.uc.mem_map(self.stack_base, self.stack_size)
-        self.uc.mem_map(self.mem_base, 2 * 1024 * 1024)  # shared block for str/func/stub
+        self.uc.mem_map(self.mem_base, self.mem_size)  # shared block for str/func/stub
 
         if self.arch == "x86":
             self.uc.reg_write(UC_X86_REG_ESP, self.stack_base + self.esp_offset)
@@ -35,7 +37,7 @@ class Emulator:
 
         if self.debug_mode:
             print(f"[emu] stack: 0x{self.stack_base:08X} size={self.stack_size}")
-            print(f"[emu] mem:   0x{self.mem_base:08X} size=2MB")
+            print(f"[emu] mem:   0x{self.mem_base:08X} size={self.mem_size}")
 
     def write(self, addr: int, data: bytes):
         self.uc.mem_write(addr, data)

@@ -91,8 +91,7 @@ class HashWorker(QThread):
 		except Exception:
 			result = {}
 		finally:
-			if hasattr(self.ctx, 'cleanup'):
-				self.ctx.cleanup()
+			self.ctx.cleanup()
 
 		self.done.emit(result)
   
@@ -264,6 +263,8 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 				le = QLineEdit()
 				if "default" in arg:
 					le.setText(str(arg["default"]))
+				elif arg['type'].endswith('*'): # do not allow manual setting of pointers
+					continue
 				inputs_dict[arg["name"]] = le
 				layout.addRow(f"{arg['name']} ({arg['type']})", le)
 
@@ -287,8 +288,6 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 					symbols = Path(syms_path).read_text().splitlines()
 					bar = self.progress_emu
 					func = func_bytes
-					self._runtime_ctx = None
-
 				elif mode == "runtime":
 					syms_path = self.symbols_input_rt.text()
 					out = self.output_rt.text()
@@ -300,10 +299,11 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 					ctx = RuntimeContext(process, pattern.arch)
 					symbols = Path(syms_path).read_text().splitlines()
 					bar = self.progress_rt
-					self._runtime_ctx = ctx  # for cleanup later
 				else:
 					QMessageBox.warning(self, "Error", "Unknown mode")
 					return
+
+				self.ctx = ctx
 			except Exception as e:
 				QMessageBox.critical(self, "Error", f"Unknown exception: {e}")
 				return
@@ -323,9 +323,9 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 
 			QMessageBox.information(self, "Done", f"Hash map saved to {output_path}")
 
-			if mode == "runtime" and hasattr(self, "_runtime_ctx"):
-				self._runtime_ctx.cleanup()
-				kill_runtime_process(self._runtime_ctx.hProcess)
+			self.ctx.cleanup()
+			if mode == "runtime":
+				kill_runtime_process(self.ctx.hProcess)
 
 			self.progress_emu.setValue(0)
 			self.progress_emu.setVisible(False)

@@ -1,7 +1,7 @@
 import ctypes
 import struct
 from ctypes import wintypes
-from hash_resolver.execution.base import ExecutionContext
+from hash_resolver.execution.base import ExecutionContext, MAP_REGION
 
 kernel32 = ctypes.windll.kernel32
 
@@ -143,7 +143,9 @@ class RuntimeContext(ExecutionContext):
 	def __init__(self, hProcess: int, arch: str):
 		self.hProcess = hProcess
 		self.arch = arch
-		self.allocs = []
+  
+		self._allocs = []
+		self._alloc_offset = 0
 
 		self._last_thread = None
 
@@ -184,7 +186,7 @@ class RuntimeContext(ExecutionContext):
   
 	def _init_memory(self):
 		self.mem_size = 2 * 1024 * 1024
-		self.mem_base = self.alloc(self.mem_size)
+		self.mem_base = self._real_alloc(self.mem_size)
   
 	def write(self, addr: int, data: bytes):
 		n = ctypes.c_size_t()
@@ -197,8 +199,9 @@ class RuntimeContext(ExecutionContext):
 			len(data),
 			ctypes.byref(n)
 		)
+  
 		if not res:
-			raise RuntimeError("WriteProcessMemory failed")
+			raise RuntimeError(f"WriteProcessMemory failed (addr: {hex(addr)}, data: {data})")
 
 	def read(self, addr: int, size: int) -> bytes:
 		buf = ctypes.create_string_buffer(size)
@@ -208,16 +211,30 @@ class RuntimeContext(ExecutionContext):
 		return buf.raw
 
 	def alloc(self, size: int) -> int:
+		align = 8
+		base = self.get_map_region(MAP_REGION.ALLOC)
+		aligned_offset = (self._alloc_offset + (align - 1)) & ~(align - 1)
+		addr = base + aligned_offset
+		if addr + size > self.mem_base + self.mem_size:
+			raise RuntimeError("Allocation failed")
+		self._alloc_offset = aligned_offset + size
+		
+		return addr
+
+	def _real_alloc(self, size: int) -> int:
 		addr = kernel32.VirtualAllocEx(self.hProcess, 0, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
 		if not addr:
 			raise RuntimeError("VirtualAllocEx failed")
-		self.allocs.append(addr)
+		self._allocs.append(addr)
 		return addr
 
-	def cleanup(self):
-		for addr in self.allocs:
+	def _real_alloc_cleanup(self):
+		for addr in self._allocs:
 			kernel32.VirtualFreeEx(self.hProcess, ctypes.c_void_p(addr), 0, MEM_RELEASE)
-		self.allocs.clear()
+		self._allocs.clear()
+	
+	def cleanup(self):
+		self._alloc_offset = 0
 
 	def reg_read(self, name: str):
 		return self._active_thread.get_reg(name)
@@ -250,7 +267,7 @@ class RuntimeContext(ExecutionContext):
 		sc += b"\xB8" + struct.pack("<I", func_addr)  # mov eax, func
 		sc += b"\xFF\xD0"                             # call eax
 
-		stub_addr = self.mem_base + 0x2000
+		stub_addr = self.get_map_region(MAP_REGION.STUB_BYTES)
 		self._stub_hang_addr = stub_addr + len(sc)
 		sc += b"\xEB\xFE"  # jmp $
    
@@ -259,12 +276,12 @@ class RuntimeContext(ExecutionContext):
 
 	def _build_stub_x64(self, pattern, func_addr, args):
 		sc = b""
+  
+		sc += b"\x48\x83\xec\x28"  # sub rsp, 0x28 (shadow space + align)
 
 		mov_reg = [b"\x48\xb9", b"\x48\xba", b"\x49\xb8", b"\x49\xb9"]  # rcx, rdx, r8, r9
 		for i, arg in enumerate(args[:4]):
 			sc += mov_reg[i] + struct.pack("<Q", arg)
-
-		sc += b"\x48\x83\xec\x28"  # sub rsp, 0x28 (shadow space + align)
 
 		for arg in reversed(args[4:]):
 			sc += b"\x68" + struct.pack("<I", arg & 0xFFFFFFFF)
@@ -273,7 +290,7 @@ class RuntimeContext(ExecutionContext):
 		sc += b"\xff\xd0"                                 # call rax
 		sc += b"\x48\x83\xc4\x28"                         # add rsp, 0x28
   
-		stub_addr = self.mem_base + 0x2000
+		stub_addr = self.get_map_region(MAP_REGION.STUB_BYTES)
 		self._stub_hang_addr = stub_addr + len(sc)
 		sc += b"\xEB\xFE"  # jmp $
 		
@@ -318,4 +335,4 @@ class RuntimeContext(ExecutionContext):
 		return self._active_thread
 
 	def __del__(self):
-		self.cleanup()
+		self._real_alloc_cleanup()

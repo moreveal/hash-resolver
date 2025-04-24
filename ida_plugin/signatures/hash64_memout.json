@@ -1,0 +1,30 @@
+{
+    "name": "custom_hash64",
+    "arch": "x64",
+
+    "calling_convention": "fastcall",
+
+    "args": [
+        {
+            "name": "input_str",
+            "type": "char*",
+            "resolve_input": true
+        },
+        {
+            "name": "output",
+            "type": "uint64*"
+        }
+    ],
+
+    "return": {
+        "type": "uint64",
+        "from": "deref:output"
+    },
+
+    "emu": {
+        "stack_base": "0x00FF0000",
+        "stack_size": "0x10000",
+        "mem_base": "0x00400000",
+        "esp_offset": "0x8000"
+    }
+}

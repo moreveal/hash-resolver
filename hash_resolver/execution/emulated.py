@@ -1,5 +1,5 @@
 from unicorn import *
-from hash_resolver.execution.base import ExecutionContext
+from hash_resolver.execution.base import ExecutionContext, MAP_REGION
 from hash_resolver.emulator import Emulator
 
 from contextlib import nullcontext
@@ -10,6 +10,9 @@ class EmulatedContext(ExecutionContext):
         self.emu = emu
         self.arch = emu.arch
         self.mem_base = emu.mem_base
+        self.mem_size = emu.mem_size
+        
+        self._alloc_offset = 0
         
     def write(self, addr, data):
         self.mu.mem_write(addr, data)
@@ -34,7 +37,7 @@ class EmulatedContext(ExecutionContext):
     def _build_stub_x86(self, pattern, func_addr: int, args = None) -> tuple[int, int]:
         code = b"\xB8" + func_addr.to_bytes(4, "little")  # mov eax, func
         code += b"\xFF\xD0"  # call eax
-        stub_addr = pattern.emu["mem_base"] + 0x2000
+        stub_addr = self.get_map_region(MAP_REGION.STUB_BYTES)
         self.write(stub_addr, code)
         return stub_addr, stub_addr + len(code)
     
@@ -43,15 +46,26 @@ class EmulatedContext(ExecutionContext):
         code += b"\x48\xB8" + func_addr.to_bytes(8, "little")  # mov rax, func
         code += b"\xFF\xD0"  # call rax
         code += b"\x48\x83\xC4\x28"  # add rsp, 0x28
-        stub_addr = pattern.emu["mem_base"] + 0x2000
+        stub_addr = self.get_map_region(MAP_REGION.STUB_BYTES)
         self.write(stub_addr, code)
         return stub_addr, stub_addr + len(code)
 
     def start(self, start_addr, end_addr):
         self.mu.emu_start(start_addr, end_addr)
 
-    def alloc(self, size):  # no-op, assume you pre-alloc
-        raise NotImplementedError("alloc not supported in emulated context")
+    def alloc(self, size: int) -> int:
+        align = 8
+        base = self.get_map_region(MAP_REGION.ALLOC)
+        aligned_offset = (self._alloc_offset + (align - 1)) & ~(align - 1)
+        addr = base + aligned_offset
+        if addr + size > self.mem_base + self.mem_size:
+            raise RuntimeError("Allocation failed")
+        self._alloc_offset = aligned_offset + size
+        
+        return addr
+    
+    def cleanup(self):
+        self._alloc_offset = 0
     
     def run_stub(self, pattern, func_addr: int, args: list[int]):
         start, end = self.build_call_stub(pattern, func_addr, args)

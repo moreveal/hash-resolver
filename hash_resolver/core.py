@@ -4,13 +4,27 @@ from unicorn import *
 from unicorn.x86_const import *
 
 from hash_resolver.pattern import Pattern
+from hash_resolver.utils import build_arg_inputs
 
 from hash_resolver.execution.base import ExecutionContext
 from hash_resolver.execution.runtime import RuntimeContext
 
 from tqdm import tqdm
-
 from typing import Optional
+
+from hash_resolver.execution.base import MAP_REGION
+
+TYPE_SIZES = {
+    "uint8": 1,
+    "uint16": 2,
+    "uint32": 4,
+    "uint64": 8,
+    "int8": 1,
+    "int16": 2,
+    "int32": 4,
+    "int64": 8,
+    "char": 1,
+}
 
 def get_hash_from_pattern(
 	ctx: ExecutionContext,
@@ -29,15 +43,13 @@ def get_hash_from_pattern(
 	"""
 
 	is_runtime = isinstance(ctx, RuntimeContext)
-
-	mem_base = ctx.mem_base
-	str_base = mem_base
-	func_addr = mem_base + 0x1000 if not is_runtime else func  # real addr in runtime
-
+	func_addr = ctx.get_map_region(MAP_REGION.FUNC_BYTES) if not is_runtime else func  # real addr in runtime
+	
 	# Prepare arguments
 	arg_values = []
-	str_offset = 0
 	for i, arg_def in enumerate(pattern.args):
+		arg_type: str = arg_def["type"]
+  
 		if i < len(arg_inputs):
 			val = arg_inputs[i]
 		elif "default" in arg_def:
@@ -45,16 +57,25 @@ def get_hash_from_pattern(
 		else:
 			raise ValueError(f"Argument '{arg_def['name']}' is required but not provided")
 
-		if arg_def["type"] == "char*":
+		is_resolve_input = arg_def.get("resolve_input", False)
+		if is_resolve_input:
 			data = val.encode("utf-8") + b"\x00"
-			addr = str_base + str_offset
+			addr = ctx.alloc(len(data))
 			ctx.write(addr, data)
 			arg_values.append(addr)
-			str_offset += len(data)
-		elif arg_def["type"].startswith("uint"):
+		elif arg_type.endswith('*'):
+			data_type = arg_type.split('*')[0]
+   
+			size = TYPE_SIZES.get(data_type, None)
+			if size:
+				addr = ctx.alloc(size)
+				arg_values.append(addr)
+			else:
+				raise NotImplementedError(f"Pointer rype {arg_type} not supported yet")
+		elif arg_type.startswith("uint"):
 			arg_values.append(int(val, 0) if isinstance(val, str) else int(val))
 		else:
-			raise NotImplementedError(f"Type {arg_def['type']} not supported yet")
+			raise NotImplementedError(f"Type {arg_type} not supported yet")
  
 	if isinstance(func, bytes):
 		ctx.write(func_addr, func)
@@ -72,6 +93,9 @@ def get_hash_from_pattern(
 			result = pattern.get_return_value(ctx)
 	except Exception as e:
 		raise RuntimeError(e)
+
+	ctx.cleanup()
+  
 	return result
 
 def resolve_hash(
@@ -98,7 +122,7 @@ def resolve_hash(
 	Returns:
 		A list of matching candidates, or None if no match found.
  	'''
-    
+	
 	results = []
 
 	# Find the argument index with "resolve_input": true
@@ -111,22 +135,7 @@ def resolve_hash(
 		raise ValueError("Pattern does not define any argument with resolve_input=true")
 
 	for candidate in candidates:
-		arg_inputs = []
-
-		for i, arg in enumerate(pattern.args):
-			name = arg["name"]
-
-			if arguments and name in arguments:
-				val = arguments[name]
-			elif i == resolve_index:
-				val = candidate
-			elif "default" in arg:
-				val = arg["default"]
-			else:
-				raise ValueError(f"Missing argument: {name}")
-
-			arg_inputs.append(val)
-
+		arg_inputs = build_arg_inputs(pattern, arguments, candidate)
 		try:
 			hash_val = get_hash_from_pattern(ctx, pattern, func_bytes, arg_inputs)
 		except Exception as e:
@@ -162,22 +171,7 @@ def bulk_generate_hashes(
 	results = {}
 
 	for sym in tqdm(symbols, desc="Resolving symbols", unit="sym"):
-		arg_inputs = []
-
-		for arg in pattern.args:
-			name = arg["name"]
-
-			if arguments and name in arguments:
-				val = arguments[name]
-			elif arg.get("resolve_input", False):
-				val = sym
-			elif "default" in arg:
-				val = arg["default"]
-			else:
-				raise ValueError(f"Missing argument: {name}")
-
-			arg_inputs.append(val)
-
+		arg_inputs = build_arg_inputs(pattern, arguments, sym)
 		try:
 			hash_val = get_hash_from_pattern(ctx, pattern, func, arg_inputs)
 			results[f"0x{hash_val:08X}"] = sym

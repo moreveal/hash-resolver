@@ -12,6 +12,7 @@ from hash_resolver.execution.runtime import RuntimeContext
 
 import json
 from hash_resolver.core import bulk_generate_hashes
+from hash_resolver.utils import build_arg_inputs
 from hash_resolver.execution.runtime_launcher import launch_runtime_process, kill_runtime_process
 
 def cmd_bulk(args):
@@ -51,21 +52,6 @@ def parse_named_args(arg_list: list[str]) -> dict:
         k, v = pair.split("=", 1)
         result[k.strip()] = v.strip()
     return result
-
-
-def build_arg_inputs(pattern, overrides: dict, resolve_input_value: str | None = None):
-    inputs = []
-    for arg in pattern.args:
-        name = arg["name"]
-        if arg.get("resolve_input", False) and resolve_input_value is not None:
-            inputs.append(resolve_input_value)
-        elif name in overrides:
-            inputs.append(overrides[name])
-        elif "default" in arg:
-            inputs.append(arg["default"])
-        else:
-            raise ValueError(f"Argument '{name}' is required but not provided")
-    return inputs
 
 def cmd_hash(args):
     pattern = load_pattern(Path(args.signature))
