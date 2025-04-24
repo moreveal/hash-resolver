@@ -31,7 +31,7 @@ It's used by framework for:
 🔹 `name`: `string`
 > Unique signature name. Used by UI/CLI/logs.
 >
-**Пример**: `cdecl_hash32`
+**Example**: `cdecl_hash32`
 
 ---
 
