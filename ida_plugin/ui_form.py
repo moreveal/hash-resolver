@@ -2,6 +2,8 @@ import idaapi
 import ida_kernwin
 import ida_funcs
 import ida_bytes
+import ida_enum
+import idc
 
 from PyQt5.QtWidgets import (
 	QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
@@ -157,15 +159,10 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 			self.update_args_emu()
 
 			# output
-			self.output_emu = QLineEdit()
-			self.output_emu.setPlaceholderText("output.json")
-			btn_out = QPushButton("...")
-			btn_out.clicked.connect(lambda: self.browse_file(self.output_emu, save=True))
-			row_out = QHBoxLayout()
-			row_out.addWidget(self.output_emu)
-			row_out.addWidget(btn_out)
-			tab.addWidget(QLabel("Output path:"))
-			tab.addLayout(row_out)
+			self.enum_name_emu = QLineEdit()
+			self.enum_name_emu.setPlaceholderText("Enum name (e.g., hashresolver_sym)")
+			tab.addWidget(QLabel("Enum name:"))
+			tab.addWidget(self.enum_name_emu)
 
 			# progress + buttons
 			self.progress_emu = QProgressBar()
@@ -224,14 +221,10 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 			self.pattern_combo_rt.currentIndexChanged.connect(self.update_args_rt)
 			self.update_args_rt()
 
-			self.output_rt = QLineEdit()
-			btn_out = QPushButton("...")
-			btn_out.clicked.connect(lambda: self.browse_file(self.output_rt, save=True))
-			row_out = QHBoxLayout()
-			row_out.addWidget(self.output_rt)
-			row_out.addWidget(btn_out)
-			tab.addWidget(QLabel("Output path:"))
-			tab.addLayout(row_out)
+			self.enum_name_rt = QLineEdit()
+			self.enum_name_rt.setPlaceholderText("Enum name (e.g., hashresolver_sym)")
+			tab.addWidget(QLabel("Enum name:"))
+			tab.addWidget(self.enum_name_rt)
 
 			self.progress_rt = QProgressBar()
 			self.progress_rt.setVisible(False)
@@ -280,17 +273,16 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 			try:
 				if mode == "emu":
 					syms_path = self.symbols_input_emu.text()
-					out = self.output_emu.text()
+					enum_name = self.enum_name_emu.text().strip()
 					args = {k: v.text().strip() for k, v in self.arg_inputs_emu.items()}
 					pattern = load_pattern(self.pattern_paths[self.pattern_combo.currentIndex()])
-					print(pattern.emu)
 					ctx = EmulatedContext(Emulator(pattern.arch, pattern.emu))
 					symbols = Path(syms_path).read_text().splitlines()
 					bar = self.progress_emu
 					func = func_bytes
 				elif mode == "runtime":
 					syms_path = self.symbols_input_rt.text()
-					out = self.output_rt.text()
+					enum_name = self.enum_name_rt.text().strip()
 					args = {k: v.text().strip() for k, v in self.arg_inputs_rt.items()}
 					pattern = load_pattern(self.pattern_paths[self.pattern_combo_rt.currentIndex()])
 					exe = self.exepath_input.text()
@@ -308,20 +300,46 @@ def show_resolver_dialog(func_name=None, func_bytes=None, func_address=None):
 				QMessageBox.critical(self, "Error", f"Unknown exception: {e}")
 				return
 
+			# Find the enum
+			enum_id = idc.get_enum(enum_name)
+			if enum_id != idc.BADADDR:
+				resp = QMessageBox.question(
+					self,
+					"Enum exists",
+					f"Enum '{enum_name}' already exists. Overwrite?",
+					QMessageBox.Yes | QMessageBox.No,
+					QMessageBox.No
+				)
+				if resp == QMessageBox.No:
+					return
+			else:
+				enum_id = idc.add_enum(-1, enum_name, 0)
+				if enum_id == idc.BADADDR:
+					QMessageBox.critical(self, "Error", f"Failed to create enum: {enum_name}")
+					return
+			self.enum_id = enum_id
+
 			self.thread = HashWorker(ctx, pattern, func, symbols, args)
 			self.thread.progress.connect(lambda step: bar.setValue(bar.value() + step))
-			self.thread.done.connect(lambda result: self.on_bulk_done(result, out, mode))
+			self.thread.done.connect(lambda result: self.on_bulk_done(result, enum_name, mode))
 			bar.setRange(0, len(symbols))
 			bar.setValue(0)
 			bar.setVisible(True)
 
 			self.thread.start()
 		
-		def on_bulk_done(self, results: dict, output_path: str, mode: str):
-			with open(output_path, "w", encoding="utf-8") as f:
-				json.dump(results, f, indent=2)
+		def on_bulk_done(self, results: dict[str, int], enum_name: str, mode: str):
+			added = 0
+			for value, name in results.items():
+				clean_name = f"h{name.capitalize()}"
+				val = int(value, 16)
+				result = ida_enum.add_enum_member(self.enum_id, clean_name, val, ida_enum.DEFMASK)
+				if result == 0:
+					added += 1
+				else:
+					print(f"[!] Failed to add {clean_name} = {value}")
 
-			QMessageBox.information(self, "Done", f"Hash map saved to {output_path}")
+			QMessageBox.information(self, "Done", f"Enum '{enum_name}' updated with {added} values.")
 
 			self.ctx.cleanup()
 			if mode == "runtime":
