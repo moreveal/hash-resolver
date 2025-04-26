@@ -1,6 +1,8 @@
 # 🔍 Hash Resolver
 
-Resolve hashed API names by emulating the hashing function in-place using [Unicorn Engine](https://www.unicorn-engine.org/) + IDA integration.
+Resolve hashed API names by performing a hasher function rather than trying to guess it. Two approaches are used to resolve hashed symbols:
+1) Emulation using [Unicorn Engine](https://www.unicorn-engine.org/)
+2) Runtime execution - stopping at OEP and running individual, especially complex, non-autonomous functions
 
 Designed for reverse engineers dealing with obfuscated malware, shellcode, or custom loaders.
 
