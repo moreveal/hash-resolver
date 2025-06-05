@@ -13,7 +13,7 @@ dependencies = [
     "pefile>=2023.2",
     "pyqt5",
     "pyyaml",
-    "pywin32"
+    "pywin32",
     "rich",
     "tqdm"
 ]
